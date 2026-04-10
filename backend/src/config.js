@@ -8,10 +8,19 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const backendRoot = path.resolve(__dirname, '..');
 
+const normalizeOrigin = (origin) => {
+  try {
+    return new URL(origin).origin;
+  } catch {
+    return origin;
+  }
+};
+
 const splitOrigins = (value) =>
   (value ?? '')
     .split(',')
     .map((origin) => origin.trim())
+    .map(normalizeOrigin)
     .filter(Boolean);
 
 export const config = {
@@ -25,4 +34,3 @@ export const config = {
   binaryDir: path.join(backendRoot, 'bin'),
   ytDlpPath: process.env.YT_DLP_PATH?.trim() || null
 };
-

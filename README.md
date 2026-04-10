@@ -137,7 +137,7 @@ You can deploy either from the dashboard or by using the included `render.yaml`.
 
 ```env
 PORT=10000
-CORS_ORIGIN=https://your-vercel-frontend.vercel.app
+CORS_ORIGIN=https://yt-download2406.vercel.app
 RATE_LIMIT_WINDOW_MS=900000
 RATE_LIMIT_MAX=25
 MAX_VIDEO_DURATION_SECONDS=14400
@@ -145,6 +145,8 @@ MAX_VIDEO_DURATION_SECONDS=14400
 
 6. Deploy the service.
 7. Copy the Render public URL into the frontend `VITE_API_BASE_URL` setting on Vercel.
+
+If the browser console says `No 'Access-Control-Allow-Origin' header`, check Render first. `CORS_ORIGIN` must exactly match the Vercel site origin, without a path. For this deployment use `https://yt-download2406.vercel.app`.
 
 ### Option B: Render Blueprint
 
