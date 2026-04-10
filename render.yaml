@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: tubevault-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeployTrigger: commit
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: RATE_LIMIT_WINDOW_MS
+        value: 900000
+      - key: RATE_LIMIT_MAX
+        value: 25
+      - key: MAX_VIDEO_DURATION_SECONDS
+        value: 14400
+      - key: CORS_ORIGIN
+        sync: false

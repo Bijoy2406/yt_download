@@ -1,0 +1,14 @@
+node_modules/
+frontend/node_modules/
+frontend/dist/
+backend/node_modules/
+backend/bin/
+backend/tmp/
+.env
+frontend/.env
+backend/.env
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
