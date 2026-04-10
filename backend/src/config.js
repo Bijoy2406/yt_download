@@ -32,5 +32,7 @@ export const config = {
   maxVideoDurationSeconds: Number(process.env.MAX_VIDEO_DURATION_SECONDS || 4 * 60 * 60),
   tempDir: path.join(backendRoot, 'tmp'),
   binaryDir: path.join(backendRoot, 'bin'),
-  ytDlpPath: process.env.YT_DLP_PATH?.trim() || null
+  ytDlpPath: process.env.YT_DLP_PATH?.trim() || null,
+  ytDlpCookiesFile: process.env.YT_DLP_COOKIES_FILE?.trim() || null,
+  ytDlpCookiesFromBrowser: process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim() || null
 };

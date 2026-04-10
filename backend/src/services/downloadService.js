@@ -45,6 +45,14 @@ const getFormatResponseInfo = (formatId) => {
 const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix }) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
   const outputTemplate = path.join(config.tempDir, `${jobPrefix}.%(ext)s`);
+  const baseArgs = [youtubeUrl, '--no-playlist', '--no-warnings', '--no-progress'];
+
+  // Add cookie support for YouTube authentication
+  if (config.ytDlpCookiesFile) {
+    baseArgs.push('--cookies', config.ytDlpCookiesFile);
+  } else if (config.ytDlpCookiesFromBrowser) {
+    baseArgs.push('--cookies-from-browser', config.ytDlpCookiesFromBrowser);
+  }
 
   if (formatId === 'audio-mp3') {
     const { contentType, expectedExtension } = getFormatResponseInfo(formatId);
@@ -53,10 +61,7 @@ const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix }) => {
       expectedExtension,
       contentType,
       args: [
-        youtubeUrl,
-        '--no-playlist',
-        '--no-warnings',
-        '--no-progress',
+        ...baseArgs,
         '--extract-audio',
         '--audio-format',
         'mp3',
@@ -76,10 +81,7 @@ const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix }) => {
     expectedExtension,
     contentType,
     args: [
-      youtubeUrl,
-      '--no-playlist',
-      '--no-warnings',
-      '--no-progress',
+      ...baseArgs,
       '-f',
       buildVideoSelector(height),
       '--recode-video',
