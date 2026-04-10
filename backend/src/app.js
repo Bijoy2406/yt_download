@@ -70,7 +70,9 @@ export const createApp = () => {
       res.json({ video });
     })
   );
-
+app.get('/', (req, res) => {
+    res.status(200).send('Server is awake');
+});
   app.get(
     '/api/download',
     asyncHandler(async (req, res) => {
