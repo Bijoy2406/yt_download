@@ -7,6 +7,8 @@ import { getFfmpegPath, getYtDlpAuthArgs, runYtDlp } from './ytdlpService.js';
 import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
+const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
+
 const findGeneratedFile = async (jobPrefix) => {
   const files = await fs.readdir(config.tempDir);
   const matchedFileName = files.find((fileName) => fileName.startsWith(jobPrefix));
@@ -85,6 +87,7 @@ const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix, enableProgress }) 
     youtubeUrl,
     '--no-playlist',
     '--no-warnings',
+    ...YOUTUBE_EXTRACTOR_ARGS,
     ...getYtDlpAuthArgs()
   ];
 
@@ -102,6 +105,8 @@ const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix, enableProgress }) 
       contentType,
       args: [
         ...baseArgs,
+        '-f',
+        'bestaudio/best',
         '--extract-audio',
         '--audio-format',
         'mp3',
@@ -246,6 +251,7 @@ export const resolveDirectVideoDownloadUrl = async (youtubeUrl, formatId) => {
     '--no-playlist',
     '--no-warnings',
     '--no-progress',
+    ...YOUTUBE_EXTRACTOR_ARGS,
     '-f',
     progressiveSelector,
     '-g',

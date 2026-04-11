@@ -4,6 +4,11 @@ import { formatBytes, formatDuration } from '../utils/formatters.js';
 import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
+const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
+
+const hasPlayableVideoFormats = (rawVideoInfo) =>
+  (rawVideoInfo.formats || []).some((format) => format.vcodec !== 'none' && format.height && !format.has_drm);
+
 const scoreVideoCandidate = (format) =>
   (format.height || 0) * 1000 + (format.fps || 0) * 10 + (format.tbr || 0);
 
@@ -107,18 +112,34 @@ export const normalizeRawVideoInfo = (rawVideoInfo) => {
 };
 
 export const getRawVideoInfo = async (youtubeUrl) => {
-  const stdout = await runYtDlp([
+  const baseArgs = [
     youtubeUrl,
     '--dump-single-json',
     '--no-playlist',
     '--no-warnings',
     '--no-progress',
     '--skip-download',
-    '--ignore-no-formats-error',
+    '--ignore-no-formats-error'
+  ];
+
+  const stdout = await runYtDlp([
+    ...baseArgs,
     ...getYtDlpAuthArgs()
   ]);
 
-  return JSON.parse(stdout);
+  const rawVideoInfo = JSON.parse(stdout);
+
+  if (hasPlayableVideoFormats(rawVideoInfo)) {
+    return rawVideoInfo;
+  }
+
+  const fallbackStdout = await runYtDlp([
+    ...baseArgs,
+    ...YOUTUBE_EXTRACTOR_ARGS,
+    ...getYtDlpAuthArgs()
+  ]);
+
+  return JSON.parse(fallbackStdout);
 };
 
 export const getVideoInfo = async (youtubeUrl) => {
