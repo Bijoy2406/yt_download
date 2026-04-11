@@ -9,6 +9,9 @@ import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
 const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
 
+const isFormatUnavailableError = (error) =>
+  /Requested format is not available/i.test(String(error?.message || ''));
+
 const findGeneratedFile = async (jobPrefix) => {
   const files = await fs.readdir(config.tempDir);
   const matchedFileName = files.find((fileName) => fileName.startsWith(jobPrefix));
@@ -80,14 +83,21 @@ const getFormatResponseInfo = (formatId) => {
   };
 };
 
-const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix, enableProgress }) => {
+const buildDownloadArgs = ({
+  youtubeUrl,
+  formatId,
+  jobPrefix,
+  enableProgress,
+  includeExtractorArgs,
+  audioFormatSelector
+}) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
   const outputTemplate = path.join(config.tempDir, `${jobPrefix}.%(ext)s`);
   const baseArgs = [
     youtubeUrl,
     '--no-playlist',
     '--no-warnings',
-    ...YOUTUBE_EXTRACTOR_ARGS,
+    ...(includeExtractorArgs ? YOUTUBE_EXTRACTOR_ARGS : []),
     ...getYtDlpAuthArgs()
   ];
 
@@ -105,8 +115,7 @@ const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix, enableProgress }) 
       contentType,
       args: [
         ...baseArgs,
-        '-f',
-        'bestaudio/best',
+        ...(audioFormatSelector ? ['-f', audioFormatSelector] : []),
         '--extract-audio',
         '--audio-format',
         'mp3',
@@ -172,12 +181,22 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
   const { onProgress } = options;
   const downloadPlan = preparedDownload || (await prepareDownload(youtubeUrl, formatId));
   const jobPrefix = randomUUID();
-  const { args, contentType, expectedExtension } = buildDownloadArgs({
-    youtubeUrl,
-    formatId,
-    jobPrefix,
-    enableProgress: typeof onProgress === 'function'
-  });
+  const attemptStrategies =
+    formatId === 'audio-mp3'
+      ? [
+          { includeExtractorArgs: false, audioFormatSelector: 'bestaudio/best' },
+          { includeExtractorArgs: true, audioFormatSelector: 'bestaudio/best' },
+          { includeExtractorArgs: false, audioFormatSelector: null },
+          { includeExtractorArgs: true, audioFormatSelector: null }
+        ]
+      : [
+          { includeExtractorArgs: false, audioFormatSelector: null },
+          { includeExtractorArgs: true, audioFormatSelector: null }
+        ];
+
+  let runArgs = null;
+  let contentType = downloadPlan.contentType;
+  let expectedExtension = downloadPlan.expectedExtension;
 
   let stderrBuffer = '';
   let lastProgress = 0;
@@ -185,40 +204,71 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
   let lastEtaText = null;
 
   // yt-dlp downloads to a temp folder and the file is removed as soon as streaming ends.
-  await runYtDlp(args, {
-    onStderrData: typeof onProgress === 'function'
-      ? (chunk) => {
-          stderrBuffer += chunk;
-          const lines = stderrBuffer.split(/\r?\n/);
-          stderrBuffer = lines.pop() || '';
+  let lastError;
+  for (let index = 0; index < attemptStrategies.length; index += 1) {
+    const strategy = attemptStrategies[index];
+    const built = buildDownloadArgs({
+      youtubeUrl,
+      formatId,
+      jobPrefix,
+      enableProgress: typeof onProgress === 'function',
+      includeExtractorArgs: strategy.includeExtractorArgs,
+      audioFormatSelector: strategy.audioFormatSelector
+    });
 
-          for (const line of lines) {
-            const parsed = parsePercentFromYtDlpLine(line);
-            const speedText = parseSpeedFromYtDlpLine(line);
-            const etaText = parseEtaFromYtDlpLine(line);
+    runArgs = built.args;
+    contentType = built.contentType;
+    expectedExtension = built.expectedExtension;
 
-            if (speedText) {
-              lastSpeedText = speedText;
+    try {
+      await runYtDlp(runArgs, {
+        onStderrData: typeof onProgress === 'function'
+          ? (chunk) => {
+              stderrBuffer += chunk;
+              const lines = stderrBuffer.split(/\r?\n/);
+              stderrBuffer = lines.pop() || '';
+
+              for (const line of lines) {
+                const parsed = parsePercentFromYtDlpLine(line);
+                const speedText = parseSpeedFromYtDlpLine(line);
+                const etaText = parseEtaFromYtDlpLine(line);
+
+                if (speedText) {
+                  lastSpeedText = speedText;
+                }
+
+                if (etaText) {
+                  lastEtaText = etaText;
+                }
+
+                if (parsed === null || parsed < lastProgress) {
+                  continue;
+                }
+
+                lastProgress = parsed;
+                onProgress({
+                  percent: parsed,
+                  speedText: lastSpeedText,
+                  etaText: lastEtaText
+                });
+              }
             }
+          : undefined
+      });
 
-            if (etaText) {
-              lastEtaText = etaText;
-            }
+      break;
+    } catch (error) {
+      lastError = error;
 
-            if (parsed === null || parsed < lastProgress) {
-              continue;
-            }
+      if (!isFormatUnavailableError(error) || index === attemptStrategies.length - 1) {
+        throw error;
+      }
+    }
+  }
 
-            lastProgress = parsed;
-            onProgress({
-              percent: parsed,
-              speedText: lastSpeedText,
-              etaText: lastEtaText
-            });
-          }
-        }
-      : undefined
-  });
+  if (lastError && runArgs === null) {
+    throw lastError;
+  }
 
   let filePath = path.join(config.tempDir, `${jobPrefix}.${expectedExtension}`);
 

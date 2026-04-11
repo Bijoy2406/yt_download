@@ -7,16 +7,38 @@ import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
 
 const hasPlayableVideoFormats = (rawVideoInfo) =>
-  (rawVideoInfo.formats || []).some((format) => format.vcodec !== 'none' && format.height && !format.has_drm);
+  (rawVideoInfo.formats || []).some((format) => format.vcodec !== 'none' && inferHeightFromFormat(format) && !format.has_drm);
 
 const scoreVideoCandidate = (format) =>
   (format.height || 0) * 1000 + (format.fps || 0) * 10 + (format.tbr || 0);
+
+const inferHeightFromFormat = (format) => {
+  if (Number.isFinite(format.height) && format.height > 0) {
+    return Number(format.height);
+  }
+
+  const fromResolution = /x(\d{3,4})/.exec(String(format.resolution || ''));
+  if (fromResolution) {
+    return Number(fromResolution[1]);
+  }
+
+  const fromLabel = /(\d{3,4})p/.exec(
+    `${String(format.format_note || '')} ${String(format.format || '')} ${String(format.format_id || '')}`
+  );
+  if (fromLabel) {
+    return Number(fromLabel[1]);
+  }
+
+  return null;
+};
 
 const buildVideoFormats = (rawVideoInfo) => {
   const videoMap = new Map();
 
   for (const format of rawVideoInfo.formats || []) {
-    if (format.vcodec === 'none' || !format.height || format.has_drm) {
+    const inferredHeight = inferHeightFromFormat(format);
+
+    if (format.vcodec === 'none' || !inferredHeight || format.has_drm) {
       continue;
     }
 
@@ -24,16 +46,16 @@ const buildVideoFormats = (rawVideoInfo) => {
       continue;
     }
 
-    const existing = videoMap.get(format.height);
+    const existing = videoMap.get(inferredHeight);
     const nextCandidate = {
-      height: format.height,
+      height: inferredHeight,
       fps: format.fps || null,
       filesize: format.filesize || format.filesize_approx || null,
-      score: scoreVideoCandidate(format)
+      score: scoreVideoCandidate({ ...format, height: inferredHeight })
     };
 
     if (!existing || nextCandidate.score > existing.score) {
-      videoMap.set(format.height, nextCandidate);
+      videoMap.set(inferredHeight, nextCandidate);
     }
   }
 
