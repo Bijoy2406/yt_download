@@ -114,6 +114,7 @@ export const getRawVideoInfo = async (youtubeUrl) => {
     '--no-warnings',
     '--no-progress',
     '--skip-download',
+    '--ignore-no-formats-error',
     ...getYtDlpAuthArgs()
   ]);
 

@@ -138,7 +138,7 @@ export const runYtDlp = async (args, options = {}) => {
   const { onStdoutData, onStderrData } = options;
   await ensureRuntimeReady();
 
-  const normalizedArgs = [...args];
+  const normalizedArgs = ['--ignore-config', ...args];
   const cookiesFlagIndex = normalizedArgs.findIndex((arg) => arg === '--cookies');
 
   if (cookiesFlagIndex !== -1 && normalizedArgs[cookiesFlagIndex + 1] && resolvedCookiesFilePath) {
