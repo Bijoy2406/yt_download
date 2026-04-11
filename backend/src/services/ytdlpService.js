@@ -16,9 +16,12 @@ const ytDlpReleaseAssetByPlatform = {
 
 let runtimePromise;
 let resolvedYtDlpPath;
+let resolvedCookiesFilePath;
 
 const getManagedBinaryPath = () =>
   path.join(config.binaryDir, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+
+const getManagedCookiesPath = () => path.join(config.tempDir, 'yt-dlp-cookies.txt');
 
 const resolveYtDlpBinaryPath = () => config.ytDlpPath || getManagedBinaryPath();
 
@@ -64,6 +67,27 @@ const ensureTempDir = async () => {
   await fs.mkdir(config.tempDir, { recursive: true });
 };
 
+const ensureWritableCookiesFile = async () => {
+  if (!config.ytDlpCookiesFile) {
+    return null;
+  }
+
+  const managedCookiesPath = getManagedCookiesPath();
+
+  try {
+    if (path.resolve(config.ytDlpCookiesFile) !== path.resolve(managedCookiesPath)) {
+      await fs.copyFile(config.ytDlpCookiesFile, managedCookiesPath);
+    }
+  } catch (error) {
+    throw createHttpError(
+      500,
+      `YT_DLP_COOKIES_FILE could not be copied to writable storage: ${error.message}`
+    );
+  }
+
+  return managedCookiesPath;
+};
+
 const ensureYtDlpBinary = async () => {
   const binaryPath = resolveYtDlpBinaryPath();
 
@@ -92,11 +116,14 @@ export const ensureRuntimeReady = async () => {
 
       await ensureTempDir();
       const binaryPath = await ensureYtDlpBinary();
+      const cookiesPath = await ensureWritableCookiesFile();
       resolvedYtDlpPath = binaryPath;
+      resolvedCookiesFilePath = cookiesPath;
 
       return {
         ytDlpPath: binaryPath,
-        ffmpegPath
+        ffmpegPath,
+        cookiesPath
       };
     })().catch((error) => {
       runtimePromise = undefined;
@@ -111,8 +138,15 @@ export const runYtDlp = async (args, options = {}) => {
   const { onStdoutData, onStderrData } = options;
   await ensureRuntimeReady();
 
+  const normalizedArgs = [...args];
+  const cookiesFlagIndex = normalizedArgs.findIndex((arg) => arg === '--cookies');
+
+  if (cookiesFlagIndex !== -1 && normalizedArgs[cookiesFlagIndex + 1] && resolvedCookiesFilePath) {
+    normalizedArgs[cookiesFlagIndex + 1] = resolvedCookiesFilePath;
+  }
+
   return new Promise((resolve, reject) => {
-    const child = spawn(resolvedYtDlpPath, args, {
+    const child = spawn(resolvedYtDlpPath, normalizedArgs, {
       windowsHide: true
     });
 
@@ -155,7 +189,7 @@ export const runYtDlp = async (args, options = {}) => {
 
 export const getYtDlpAuthArgs = () => {
   if (config.ytDlpCookiesFile) {
-    return ['--cookies', config.ytDlpCookiesFile];
+    return ['--cookies', resolvedCookiesFilePath || getManagedCookiesPath()];
   }
 
   if (config.ytDlpCookiesFromBrowser) {
