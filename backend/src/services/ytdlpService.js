@@ -150,6 +150,18 @@ export const runYtDlp = async (args) => {
   });
 };
 
+export const getYtDlpAuthArgs = () => {
+  if (config.ytDlpCookiesFile) {
+    return ['--cookies', config.ytDlpCookiesFile];
+  }
+
+  if (config.ytDlpCookiesFromBrowser) {
+    return ['--cookies-from-browser', config.ytDlpCookiesFromBrowser];
+  }
+
+  return [];
+};
+
 export const getFfmpegPath = () => {
   if (!ffmpegPath) {
     throw createHttpError(500, 'ffmpeg binary was not available.');

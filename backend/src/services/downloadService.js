@@ -3,7 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { getRawVideoInfo, normalizeRawVideoInfo } from './videoService.js';
-import { getFfmpegPath, runYtDlp } from './ytdlpService.js';
+import { getFfmpegPath, getYtDlpAuthArgs, runYtDlp } from './ytdlpService.js';
 import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
@@ -45,14 +45,13 @@ const getFormatResponseInfo = (formatId) => {
 const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix }) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
   const outputTemplate = path.join(config.tempDir, `${jobPrefix}.%(ext)s`);
-  const baseArgs = [youtubeUrl, '--no-playlist', '--no-warnings', '--no-progress'];
-
-  // Add cookie support for YouTube authentication
-  if (config.ytDlpCookiesFile) {
-    baseArgs.push('--cookies', config.ytDlpCookiesFile);
-  } else if (config.ytDlpCookiesFromBrowser) {
-    baseArgs.push('--cookies-from-browser', config.ytDlpCookiesFromBrowser);
-  }
+  const baseArgs = [
+    youtubeUrl,
+    '--no-playlist',
+    '--no-warnings',
+    '--no-progress',
+    ...getYtDlpAuthArgs()
+  ];
 
   if (formatId === 'audio-mp3') {
     const { contentType, expectedExtension } = getFormatResponseInfo(formatId);

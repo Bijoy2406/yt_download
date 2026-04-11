@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { runYtDlp } from './ytdlpService.js';
+import { getYtDlpAuthArgs, runYtDlp } from './ytdlpService.js';
 import { formatBytes, formatDuration } from '../utils/formatters.js';
 import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
@@ -113,7 +113,8 @@ export const getRawVideoInfo = async (youtubeUrl) => {
     '--no-playlist',
     '--no-warnings',
     '--no-progress',
-    '--skip-download'
+    '--skip-download',
+    ...getYtDlpAuthArgs()
   ]);
 
   return JSON.parse(stdout);
