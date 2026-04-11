@@ -21,6 +21,42 @@ const findGeneratedFile = async (jobPrefix) => {
 const buildVideoSelector = (height) =>
   `bv*[height<=${height}]+ba/b[height<=${height}]/best`;
 
+const parsePercentFromYtDlpLine = (line) => {
+  const match = /(\d{1,3}(?:\.\d+)?)%/.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  const value = Number(match[1]);
+
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, value));
+};
+
+const parseSpeedFromYtDlpLine = (line) => {
+  const match = /\bat\s+([^\s]+\/s)\b/i.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  return match[1];
+};
+
+const parseEtaFromYtDlpLine = (line) => {
+  const match = /\bETA\s+([0-9:]+|Unknown)\b/i.exec(line);
+
+  if (!match) {
+    return null;
+  }
+
+  return match[1];
+};
+
 const getFormatResponseInfo = (formatId) => {
   if (formatId === 'audio-mp3') {
     return {
@@ -42,16 +78,21 @@ const getFormatResponseInfo = (formatId) => {
   };
 };
 
-const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix }) => {
+const buildDownloadArgs = ({ youtubeUrl, formatId, jobPrefix, enableProgress }) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
   const outputTemplate = path.join(config.tempDir, `${jobPrefix}.%(ext)s`);
   const baseArgs = [
     youtubeUrl,
     '--no-playlist',
     '--no-warnings',
-    '--no-progress',
     ...getYtDlpAuthArgs()
   ];
+
+  if (enableProgress) {
+    baseArgs.push('--newline');
+  } else {
+    baseArgs.push('--no-progress');
+  }
 
   if (formatId === 'audio-mp3') {
     const { contentType, expectedExtension } = getFormatResponseInfo(formatId);
@@ -122,17 +163,57 @@ export const prepareDownload = async (youtubeUrl, formatId) => {
   };
 };
 
-export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload) => {
+export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, options = {}) => {
+  const { onProgress } = options;
   const downloadPlan = preparedDownload || (await prepareDownload(youtubeUrl, formatId));
   const jobPrefix = randomUUID();
   const { args, contentType, expectedExtension } = buildDownloadArgs({
     youtubeUrl,
     formatId,
-    jobPrefix
+    jobPrefix,
+    enableProgress: typeof onProgress === 'function'
   });
 
+  let stderrBuffer = '';
+  let lastProgress = 0;
+  let lastSpeedText = null;
+  let lastEtaText = null;
+
   // yt-dlp downloads to a temp folder and the file is removed as soon as streaming ends.
-  await runYtDlp(args);
+  await runYtDlp(args, {
+    onStderrData: typeof onProgress === 'function'
+      ? (chunk) => {
+          stderrBuffer += chunk;
+          const lines = stderrBuffer.split(/\r?\n/);
+          stderrBuffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const parsed = parsePercentFromYtDlpLine(line);
+            const speedText = parseSpeedFromYtDlpLine(line);
+            const etaText = parseEtaFromYtDlpLine(line);
+
+            if (speedText) {
+              lastSpeedText = speedText;
+            }
+
+            if (etaText) {
+              lastEtaText = etaText;
+            }
+
+            if (parsed === null || parsed < lastProgress) {
+              continue;
+            }
+
+            lastProgress = parsed;
+            onProgress({
+              percent: parsed,
+              speedText: lastSpeedText,
+              etaText: lastEtaText
+            });
+          }
+        }
+      : undefined
+  });
 
   let filePath = path.join(config.tempDir, `${jobPrefix}.${expectedExtension}`);
 
@@ -150,4 +231,31 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload) 
     fileSize: stat.size,
     contentType: contentType || downloadPlan.contentType
   };
+};
+
+export const resolveDirectVideoDownloadUrl = async (youtubeUrl, formatId) => {
+  if (!formatId.startsWith('video-')) {
+    return null;
+  }
+
+  const { height } = getFormatResponseInfo(formatId);
+  const progressiveSelector = `b[height<=${height}][ext=mp4]/b[height<=${height}]/best[height<=${height}]`;
+
+  const stdout = await runYtDlp([
+    youtubeUrl,
+    '--no-playlist',
+    '--no-warnings',
+    '--no-progress',
+    '-f',
+    progressiveSelector,
+    '-g',
+    ...getYtDlpAuthArgs()
+  ]);
+
+  const directUrl = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return directUrl || null;
 };

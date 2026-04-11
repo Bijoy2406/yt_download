@@ -107,7 +107,8 @@ export const ensureRuntimeReady = async () => {
   return runtimePromise;
 };
 
-export const runYtDlp = async (args) => {
+export const runYtDlp = async (args, options = {}) => {
+  const { onStdoutData, onStderrData } = options;
   await ensureRuntimeReady();
 
   return new Promise((resolve, reject) => {
@@ -123,10 +124,12 @@ export const runYtDlp = async (args) => {
 
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
+      onStdoutData?.(chunk);
     });
 
     child.stderr.on('data', (chunk) => {
       stderr = `${stderr}${chunk}`.slice(-4000);
+      onStderrData?.(chunk);
     });
 
     child.on('error', (error) => {
