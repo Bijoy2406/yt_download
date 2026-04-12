@@ -8,6 +8,8 @@ import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
 const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
+const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1 = ['--extractor-args', 'youtube:player_client=tv,mweb,web_embedded'];
+const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2 = ['--extractor-args', 'youtube:player_client=web_safari,web_creator'];
 
 const isFormatUnavailableError = (error) =>
   /Requested format is not available/i.test(String(error?.message || ''));
@@ -24,7 +26,9 @@ const findGeneratedFile = async (jobPrefix) => {
 };
 
 const buildVideoSelector = (height) =>
-  `bv*[height<=${height}]+ba/b[height<=${height}]/best`;
+  // Multiple fallback selectors to handle different YouTube format availability
+  // Try to get video+audio, fallback to single stream, then best available
+  `bv*[height=${height}]+ba/bv*[height<=${height}]+ba/b[height<=${height}]/bv[height<=${height}]+ba/best[height<=${height}]/best`;
 
 const parsePercentFromYtDlpLine = (line) => {
   const match = /(\d{1,3}(?:\.\d+)?)%/.exec(line);
@@ -88,7 +92,7 @@ const buildDownloadArgs = ({
   formatId,
   jobPrefix,
   enableProgress,
-  includeExtractorArgs,
+  extractorArgs,
   audioFormatSelector
 }) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
@@ -97,7 +101,7 @@ const buildDownloadArgs = ({
     youtubeUrl,
     '--no-playlist',
     '--no-warnings',
-    ...(includeExtractorArgs ? YOUTUBE_EXTRACTOR_ARGS : []),
+    ...(extractorArgs ? extractorArgs : []),
     ...getYtDlpAuthArgs()
   ];
 
@@ -181,17 +185,23 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
   const { onProgress } = options;
   const downloadPlan = preparedDownload || (await prepareDownload(youtubeUrl, formatId));
   const jobPrefix = randomUUID();
+  
+  // Enhanced retry strategies with different player clients for production environments
   const attemptStrategies =
     formatId === 'audio-mp3'
       ? [
-          { includeExtractorArgs: false, audioFormatSelector: 'bestaudio/best' },
-          { includeExtractorArgs: true, audioFormatSelector: 'bestaudio/best' },
-          { includeExtractorArgs: false, audioFormatSelector: null },
-          { includeExtractorArgs: true, audioFormatSelector: null }
+          { extractorArgs: null, audioFormatSelector: 'bestaudio/best' },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: 'bestaudio/best' },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1, audioFormatSelector: 'bestaudio/best' },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2, audioFormatSelector: 'bestaudio/best' },
+          { extractorArgs: null, audioFormatSelector: null },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: null }
         ]
       : [
-          { includeExtractorArgs: false, audioFormatSelector: null },
-          { includeExtractorArgs: true, audioFormatSelector: null }
+          { extractorArgs: null },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1 },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2 }
         ];
 
   let runArgs = null;
@@ -212,7 +222,7 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
       formatId,
       jobPrefix,
       enableProgress: typeof onProgress === 'function',
-      includeExtractorArgs: strategy.includeExtractorArgs,
+      extractorArgs: strategy.extractorArgs,
       audioFormatSelector: strategy.audioFormatSelector
     });
 
@@ -221,6 +231,11 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
     expectedExtension = built.expectedExtension;
 
     try {
+      const strategyLabel = strategy.extractorArgs 
+        ? strategy.extractorArgs[1] 
+        : 'default';
+      console.log(`Download attempt ${index + 1} using: ${strategyLabel}`);
+
       await runYtDlp(runArgs, {
         onStderrData: typeof onProgress === 'function'
           ? (chunk) => {
@@ -256,13 +271,17 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
           : undefined
       });
 
+      console.log(`Download succeeded on attempt ${index + 1}`);
       break;
     } catch (error) {
       lastError = error;
+      console.error(`Download attempt ${index + 1} failed:`, error.message);
 
       if (!isFormatUnavailableError(error) || index === attemptStrategies.length - 1) {
         throw error;
       }
+
+      console.log(`Retrying with different player client...`);
     }
   }
 
@@ -296,22 +315,41 @@ export const resolveDirectVideoDownloadUrl = async (youtubeUrl, formatId) => {
   const { height } = getFormatResponseInfo(formatId);
   const progressiveSelector = `b[height<=${height}][ext=mp4]/b[height<=${height}]/best[height<=${height}]`;
 
-  const stdout = await runYtDlp([
-    youtubeUrl,
-    '--no-playlist',
-    '--no-warnings',
-    '--no-progress',
-    ...YOUTUBE_EXTRACTOR_ARGS,
-    '-f',
-    progressiveSelector,
-    '-g',
-    ...getYtDlpAuthArgs()
-  ]);
+  // Try multiple player clients for direct URL resolution
+  const extractorStrategies = [
+    [],
+    YOUTUBE_EXTRACTOR_ARGS,
+    YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1,
+    YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2
+  ];
 
-  const directUrl = stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
+  for (const extractorArgs of extractorStrategies) {
+    try {
+      const stdout = await runYtDlp([
+        youtubeUrl,
+        '--no-playlist',
+        '--no-warnings',
+        '--no-progress',
+        ...(extractorArgs.length > 0 ? extractorArgs : []),
+        '-f',
+        progressiveSelector,
+        '-g',
+        ...getYtDlpAuthArgs()
+      ]);
 
-  return directUrl || null;
+      const directUrl = stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean);
+
+      if (directUrl) {
+        return directUrl;
+      }
+    } catch (error) {
+      console.log(`Direct URL resolution failed with extractor: ${extractorArgs[1] || 'default'}`);
+      // Continue to next strategy
+    }
+  }
+
+  return null;
 };
