@@ -41,8 +41,8 @@ const findGeneratedFile = async (jobPrefix) => {
 
 const buildVideoSelector = (height) =>
   // Multiple fallback selectors to handle different YouTube format availability
-  // Try to get video+audio, fallback to single stream, then best available
-  `bv*[height=${height}]+ba/bv*[height<=${height}]+ba/b[height<=${height}]/bv[height<=${height}]+ba/best[height<=${height}]/best`;
+  // Try to get video+audio, fallback to single stream, then best available, then any fallback
+  `bv*[height=${height}]+ba/bv*[height<=${height}]+ba/b[height<=${height}]/bv[height<=${height}]+ba/best[height<=${height}]/best/bestvideo+bestaudio/b`;
 
 const parsePercentFromYtDlpLine = (line) => {
   const match = /(\d{1,3}(?:\.\d+)?)%/.exec(line);
@@ -221,8 +221,9 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
           { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: 'bestaudio/best' },
           { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1, audioFormatSelector: 'bestaudio/best' },
           { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2, audioFormatSelector: 'bestaudio/best' },
-          { extractorArgs: null, audioFormatSelector: null },
-          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: null }
+          { extractorArgs: null, audioFormatSelector: 'best/b' },
+          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: 'best/b' },
+          { extractorArgs: null, audioFormatSelector: null }
         ]
       : buildVideoAttemptStrategies();
 
