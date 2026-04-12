@@ -11,8 +11,22 @@ const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=andro
 const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1 = ['--extractor-args', 'youtube:player_client=tv,mweb,web_embedded'];
 const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2 = ['--extractor-args', 'youtube:player_client=web_safari,web_creator'];
 
+const ALL_EXTRACTOR_STRATEGIES = [
+  null,
+  YOUTUBE_EXTRACTOR_ARGS,
+  YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1,
+  YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2
+];
+
+const buildOrderedVideoStrategies = (winningExtractorArgs) => {
+  const preferred = winningExtractorArgs ?? null;
+  const rest = ALL_EXTRACTOR_STRATEGIES.filter((s) => s !== preferred);
+  return [preferred, ...rest].map((extractorArgs) => ({ extractorArgs }));
+};
+
 const isFormatUnavailableError = (error) =>
-  /Requested format is not available/i.test(String(error?.message || ''));
+  /requested format(s)? (is|are) not available|no (video )?formats? found|no suitable formats|requested formats are incompatible/i
+    .test(String(error?.message || ''));
 
 const findGeneratedFile = async (jobPrefix) => {
   const files = await fs.readdir(config.tempDir);
@@ -93,7 +107,8 @@ const buildDownloadArgs = ({
   jobPrefix,
   enableProgress,
   extractorArgs,
-  audioFormatSelector
+  audioFormatSelector,
+  forceFormatSelector
 }) => {
   const ffmpegDirectory = path.dirname(getFfmpegPath());
   const outputTemplate = path.join(config.tempDir, `${jobPrefix}.%(ext)s`);
@@ -141,7 +156,7 @@ const buildDownloadArgs = ({
     args: [
       ...baseArgs,
       '-f',
-      buildVideoSelector(height),
+      forceFormatSelector ?? buildVideoSelector(height),
       '--recode-video',
       'mp4',
       '--merge-output-format',
@@ -155,7 +170,7 @@ const buildDownloadArgs = ({
 };
 
 export const prepareDownload = async (youtubeUrl, formatId) => {
-  const rawVideoInfo = await getRawVideoInfo(youtubeUrl);
+  const { rawVideoInfo, winningExtractorArgs } = await getRawVideoInfo(youtubeUrl);
   const videoInfo = normalizeRawVideoInfo(rawVideoInfo);
   const supportedFormatIds = new Set(videoInfo.formats.map((format) => format.id));
 
@@ -177,16 +192,28 @@ export const prepareDownload = async (youtubeUrl, formatId) => {
   return {
     contentType,
     expectedExtension,
-    fileName
+    fileName,
+    winningExtractorArgs
   };
 };
 
 export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, options = {}) => {
-  const { onProgress } = options;
+  const { onProgress, signal } = options;
   const downloadPlan = preparedDownload || (await prepareDownload(youtubeUrl, formatId));
   const jobPrefix = randomUUID();
   
   // Enhanced retry strategies with different player clients for production environments
+  // For video: start with the client that successfully fetched format info, then try others
+  const buildVideoAttemptStrategies = () => {
+    const strategies = buildOrderedVideoStrategies(downloadPlan.winningExtractorArgs ?? null);
+    // Append absolute last-resort: winning client with unconstrained 'best' selector
+    strategies.push({
+      extractorArgs: downloadPlan.winningExtractorArgs ?? null,
+      forceFormatSelector: 'best'
+    });
+    return strategies;
+  };
+
   const attemptStrategies =
     formatId === 'audio-mp3'
       ? [
@@ -197,21 +224,26 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
           { extractorArgs: null, audioFormatSelector: null },
           { extractorArgs: YOUTUBE_EXTRACTOR_ARGS, audioFormatSelector: null }
         ]
-      : [
-          { extractorArgs: null },
-          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS },
-          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1 },
-          { extractorArgs: YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2 }
-        ];
+      : buildVideoAttemptStrategies();
 
   let runArgs = null;
   let contentType = downloadPlan.contentType;
   let expectedExtension = downloadPlan.expectedExtension;
 
-  let stderrBuffer = '';
-  let lastProgress = 0;
+  let stdoutBuffer = '';
   let lastSpeedText = null;
   let lastEtaText = null;
+  let lastEmittedPercent = -1;
+
+  // For multi-pass downloads (video+audio), map each pass to a portion of 0-100%
+  let currentPass = 0;
+  let totalPasses = formatId === 'audio-mp3' ? 1 : 2;
+
+  const toGlobalPercent = (passPercent, pass, total) => {
+    if (total <= 1) return passPercent;
+    const sliceSize = 100 / total;
+    return Math.round((pass - 1) * sliceSize + (passPercent * sliceSize) / 100);
+  };
 
   // yt-dlp downloads to a temp folder and the file is removed as soon as streaming ends.
   let lastError;
@@ -223,46 +255,76 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
       jobPrefix,
       enableProgress: typeof onProgress === 'function',
       extractorArgs: strategy.extractorArgs,
-      audioFormatSelector: strategy.audioFormatSelector
+      audioFormatSelector: strategy.audioFormatSelector,
+      forceFormatSelector: strategy.forceFormatSelector
     });
 
     runArgs = built.args;
     contentType = built.contentType;
     expectedExtension = built.expectedExtension;
 
+    // Reset per-attempt state
+    stdoutBuffer = '';
+    lastEmittedPercent = -1;
+    currentPass = 0;
+
     try {
-      const strategyLabel = strategy.extractorArgs 
-        ? strategy.extractorArgs[1] 
+      const strategyLabel = strategy.extractorArgs
+        ? strategy.extractorArgs[1]
         : 'default';
       console.log(`Download attempt ${index + 1} using: ${strategyLabel}`);
 
       await runYtDlp(runArgs, {
-        onStderrData: typeof onProgress === 'function'
+        signal,
+        onStdoutData: typeof onProgress === 'function'
           ? (chunk) => {
-              stderrBuffer += chunk;
-              const lines = stderrBuffer.split(/\r?\n/);
-              stderrBuffer = lines.pop() || '';
+              stdoutBuffer += chunk;
+              // Split on \r\n, \n, or standalone \r — yt-dlp on Windows often
+              // outputs progress lines terminated with \r only
+              const lines = stdoutBuffer.split(/\r\n|\n|\r/);
+              stdoutBuffer = lines.pop() || '';
 
+              let foundProgress = false;
               for (const line of lines) {
+                // Log first few lines for debugging
+                if (!foundProgress && line.includes('[download]')) {
+                  console.log(`[yt-dlp stderr] ${line.substring(0, 100)}`);
+                }
+
                 const parsed = parsePercentFromYtDlpLine(line);
                 const speedText = parseSpeedFromYtDlpLine(line);
                 const etaText = parseEtaFromYtDlpLine(line);
 
-                if (speedText) {
-                  lastSpeedText = speedText;
-                }
+                // Update cached speed and ETA
+                if (speedText) lastSpeedText = speedText;
+                if (etaText) lastEtaText = etaText;
 
-                if (etaText) {
-                  lastEtaText = etaText;
-                }
-
-                if (parsed === null || parsed < lastProgress) {
+                // Detect new download pass via "[download] Destination:" lines
+                if (/\[download\]\s+Destination:/i.test(line)) {
+                  currentPass += 1;
+                  console.log(`[Pass] Detected new pass: ${currentPass}`);
                   continue;
                 }
 
-                lastProgress = parsed;
+                // Only emit if we have a percentage from this line
+                if (parsed === null) {
+                  continue;
+                }
+
+                foundProgress = true;
+
+                // Skip duplicate emissions of the same percent
+                const pass = Math.max(1, currentPass);
+                const globalPercent = toGlobalPercent(parsed, pass, totalPasses);
+
+                if (globalPercent === lastEmittedPercent) {
+                  continue;
+                }
+
+                console.log(`[EmitProgress] ${globalPercent}% (pass ${pass}/${totalPasses})`);
+                lastEmittedPercent = globalPercent;
                 onProgress({
-                  percent: parsed,
+                  percent: globalPercent,
                   speedText: lastSpeedText,
                   etaText: lastEtaText
                 });
@@ -276,6 +338,10 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
     } catch (error) {
       lastError = error;
       console.error(`Download attempt ${index + 1} failed:`, error.message);
+
+      if (error.name === 'AbortError') {
+        throw error;
+      }
 
       if (!isFormatUnavailableError(error) || index === attemptStrategies.length - 1) {
         throw error;

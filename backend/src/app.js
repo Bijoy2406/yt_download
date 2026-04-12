@@ -130,7 +130,17 @@ export const createApp = () => {
 
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: false }));
-  app.use(compression());
+  app.use(
+    compression({
+      filter(req, res) {
+        if (req.path.startsWith('/api/download/progress/') && req.path.endsWith('/stream')) {
+          return false;
+        }
+
+        return compression.filter(req, res);
+      }
+    })
+  );
   app.use(cors(buildCorsConfig()));
   app.use(defaultLimiter);
   app.use(morgan('combined'));
@@ -169,8 +179,8 @@ export const createApp = () => {
       const job = {
         id: jobId,
         status: 'preparing',
-        progress: 1,
-        label: 'Validating video',
+        progress: 0,
+        label: 'Preparing download',
         error: null,
         speedText: null,
         etaText: null,
@@ -180,8 +190,10 @@ export const createApp = () => {
         fileSize: null,
         downloadUrl: null,
         cleanupTimer: null,
+        abortController: new AbortController(),
         createdAt: Date.now(),
-        updatedAt: Date.now()
+        updatedAt: Date.now(),
+        sseClients: new Set() // Store SSE clients for this job
       };
 
       preparationJobs.set(jobId, job);
@@ -195,15 +207,8 @@ export const createApp = () => {
             return;
           }
 
-          trackedJob.progress = 12;
-          trackedJob.label = 'Reading stream metadata';
-          trackedJob.updatedAt = Date.now();
-
-          trackedJob.progress = 35;
-          trackedJob.label = 'Preparing file on server';
-          trackedJob.updatedAt = Date.now();
-
           const downloadJob = await createDownloadJob(normalizedUrl, requestedFormat, preparedDownload, {
+            signal: trackedJob.abortController.signal,
             onProgress: (progressInfo) => {
               const activeJob = preparationJobs.get(jobId);
 
@@ -211,14 +216,26 @@ export const createApp = () => {
                 return;
               }
 
-              activeJob.progress = Math.max(
-                activeJob.progress,
-                Math.min(95, Math.round(35 + progressInfo.percent * 0.6))
-              );
-              activeJob.label = 'Preparing file on server';
-              activeJob.speedText = progressInfo.speedText || activeJob.speedText;
-              activeJob.etaText = progressInfo.etaText || activeJob.etaText;
+              console.log(`[Progress] ${progressInfo.percent}% - Speed: ${progressInfo.speedText} - ETA: ${progressInfo.etaText} - Clients: ${activeJob.sseClients.size}`);
+
+              activeJob.progress = progressInfo.percent;
+              activeJob.label = 'Downloading';
+              activeJob.speedText = progressInfo.speedText;
+              activeJob.etaText = progressInfo.etaText;
               activeJob.updatedAt = Date.now();
+
+              // Broadcast progress to all SSE clients
+              const progressEvent = JSON.stringify({
+                progress: progressInfo.percent,
+                speedText: progressInfo.speedText,
+                etaText: progressInfo.etaText
+              });
+
+              if (activeJob.sseClients.size > 0) {
+                activeJob.sseClients.forEach((client) => {
+                  client.write(`data: ${progressEvent}\n\n`);
+                });
+              }
             }
           });
 
@@ -229,8 +246,36 @@ export const createApp = () => {
             contentType: downloadJob.contentType,
             fileSize: downloadJob.fileSize
           });
+
+          // Notify SSE clients that download is ready
+          const finishedJob = preparationJobs.get(jobId);
+          if (finishedJob) {
+            const readyEvent = JSON.stringify({
+              status: 'ready',
+              downloadUrl: finishedJob.downloadUrl,
+              fileName: finishedJob.fileName
+            });
+            const clients = Array.from(finishedJob.sseClients);
+            clients.forEach((client) => {
+              client.write(`data: ${readyEvent}\n\n`);
+              client.end();
+              finishedJob.sseClients.delete(client);
+            });
+          }
         } catch (error) {
           markPreparationFailed(jobId, error);
+
+          // Notify SSE clients of failure
+          const failedJob = preparationJobs.get(jobId);
+          if (failedJob) {
+            const errorEvent = JSON.stringify({ status: 'failed', error: error.message });
+            const clients = Array.from(failedJob.sseClients);
+            clients.forEach((client) => {
+              client.write(`data: ${errorEvent}\n\n`);
+              client.end();
+              failedJob.sseClients.delete(client);
+            });
+          }
         }
       })();
 
@@ -238,6 +283,34 @@ export const createApp = () => {
         jobId
       });
     })
+  );
+
+  app.delete(
+    '/api/download/cancel/:jobId',
+    (req, res) => {
+      const job = preparationJobs.get(req.params.jobId);
+
+      if (!job) {
+        return res.status(404).json({ error: 'Job not found' });
+      }
+
+      if (job.abortController) {
+        job.abortController.abort();
+      }
+
+      job.status = 'failed';
+      job.error = 'Cancelled by user';
+      
+      const errorEvent = JSON.stringify({ status: 'failed', error: 'Cancelled by user' });
+      job.sseClients.forEach((client) => {
+        client.write(`data: ${errorEvent}\n\n`);
+        client.end();
+      });
+      job.sseClients.clear();
+
+      void removePreparationJob(job.id);
+      res.json({ success: true });
+    }
   );
 
   app.get(
@@ -265,6 +338,68 @@ export const createApp = () => {
         }
       });
     })
+  );
+
+  app.get(
+    '/api/download/progress/:jobId/stream',
+    (req, res) => {
+      try {
+        const job = preparationJobs.get(req.params.jobId);
+
+        if (!job) {
+          res.status(404).json({ error: 'Download preparation job was not found or expired.' });
+          return;
+        }
+
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+
+        // If the job already finished before the client connected, send final state immediately
+        if (job.status === 'ready') {
+          res.write(`data: ${JSON.stringify({
+            status: 'ready',
+            downloadUrl: job.downloadUrl,
+            fileName: job.fileName
+          })}\n\n`);
+          res.end();
+          return;
+        }
+
+        if (job.status === 'failed') {
+          res.write(`data: ${JSON.stringify({ status: 'failed', error: job.error })}\n\n`);
+          res.end();
+          return;
+        }
+
+        // Send current progress as initial state
+        res.write(`data: ${JSON.stringify({
+          progress: job.progress,
+          speedText: job.speedText,
+          etaText: job.etaText
+        })}\n\n`);
+
+        // Register client for live updates
+        job.sseClients.add(res);
+
+        const cleanup = () => {
+          job.sseClients.delete(res);
+          if (!res.writableEnded) res.end();
+        };
+
+        req.on('close', cleanup);
+        req.on('error', cleanup);
+      } catch (error) {
+        console.error('SSE stream error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Internal server error' });
+        } else {
+          res.end();
+        }
+      }
+    }
   );
 
   app.get(

@@ -147,7 +147,8 @@ export const runYtDlp = async (args, options = {}) => {
 
   return new Promise((resolve, reject) => {
     const child = spawn(resolvedYtDlpPath, normalizedArgs, {
-      windowsHide: true
+      windowsHide: true,
+      signal: options.signal
     });
 
     let stdout = '';

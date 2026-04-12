@@ -4,11 +4,12 @@ import { formatBytes, formatDuration } from '../utils/formatters.js';
 import { createHttpError } from '../utils/httpError.js';
 import { sanitizeFilename } from '../utils/sanitizeFilename.js';
 
-const YOUTUBE_EXTRACTOR_ARGS = ['--extractor-args', 'youtube:player_client=android,web,ios'];
-
-// Additional fallback strategies for production environments
-const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1 = ['--extractor-args', 'youtube:player_client=tv,mweb,web_embedded'];
-const YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2 = ['--extractor-args', 'youtube:player_client=web_safari,web_creator'];
+const EXTRACTOR_ARG_STRATEGIES = [
+  null,
+  ['--extractor-args', 'youtube:player_client=android,web,ios'],
+  ['--extractor-args', 'youtube:player_client=tv,mweb,web_embedded'],
+  ['--extractor-args', 'youtube:player_client=web_safari,web_creator']
+];
 
 const hasPlayableVideoFormats = (rawVideoInfo) =>
   (rawVideoInfo.formats || []).some((format) => format.vcodec !== 'none' && inferHeightFromFormat(format) && !format.has_drm);
@@ -150,58 +151,24 @@ export const getRawVideoInfo = async (youtubeUrl) => {
 
   const authArgs = getYtDlpAuthArgs();
 
-  // First attempt: default extractor
-  const stdout = await runYtDlp([...baseArgs, ...authArgs]);
-  const rawVideoInfo = JSON.parse(stdout);
+  for (let i = 0; i < EXTRACTOR_ARG_STRATEGIES.length; i++) {
+    const extractorArgs = EXTRACTOR_ARG_STRATEGIES[i];
+    const extraArgs = extractorArgs ?? [];
+    const stdout = await runYtDlp([...baseArgs, ...extraArgs, ...authArgs]);
+    const rawVideoInfo = JSON.parse(stdout);
 
-  if (hasPlayableVideoFormats(rawVideoInfo)) {
-    return rawVideoInfo;
+    if (hasPlayableVideoFormats(rawVideoInfo) || i === EXTRACTOR_ARG_STRATEGIES.length - 1) {
+      if (i > 0) {
+        console.log(`getRawVideoInfo succeeded with strategy ${i}: ${extraArgs[1]}`);
+      }
+      return { rawVideoInfo, winningExtractorArgs: extractorArgs };
+    }
+
+    console.log(`getRawVideoInfo strategy ${i} returned no playable formats, trying next...`);
   }
-
-  console.log('First attempt failed to get video formats, trying fallback player clients...');
-
-  // Second attempt: android,web,ios clients
-  const fallback1Stdout = await runYtDlp([
-    ...baseArgs,
-    ...YOUTUBE_EXTRACTOR_ARGS,
-    ...authArgs
-  ]);
-  const fallback1Info = JSON.parse(fallback1Stdout);
-
-  if (hasPlayableVideoFormats(fallback1Info)) {
-    console.log('Fallback 1 (android,web,ios) succeeded');
-    return fallback1Info;
-  }
-
-  console.log('Fallback 1 failed, trying fallback 2 (tv,mweb,web_embedded)...');
-
-  // Third attempt: tv,mweb,web_embedded clients
-  const fallback2Stdout = await runYtDlp([
-    ...baseArgs,
-    ...YOUTUBE_EXTRACTOR_ARGS_FALLBACK_1,
-    ...authArgs
-  ]);
-  const fallback2Info = JSON.parse(fallback2Stdout);
-
-  if (hasPlayableVideoFormats(fallback2Info)) {
-    console.log('Fallback 2 (tv,mweb,web_embedded) succeeded');
-    return fallback2Info;
-  }
-
-  console.log('Fallback 2 failed, trying fallback 3 (web_safari,web_creator)...');
-
-  // Fourth attempt: web_safari,web_creator clients
-  const fallback3Stdout = await runYtDlp([
-    ...baseArgs,
-    ...YOUTUBE_EXTRACTOR_ARGS_FALLBACK_2,
-    ...authArgs
-  ]);
-
-  console.log('Returning result from final fallback attempt');
-  return JSON.parse(fallback3Stdout);
 };
 
 export const getVideoInfo = async (youtubeUrl) => {
-  const rawVideoInfo = await getRawVideoInfo(youtubeUrl);
+  const { rawVideoInfo } = await getRawVideoInfo(youtubeUrl);
   return normalizeRawVideoInfo(rawVideoInfo);
 };

@@ -80,44 +80,69 @@ const audioFormatFixture = [
 ];
 
 const openExternalDownload = (downloadUrl) => {
-  const link = document.createElement('a');
-  link.href = downloadUrl;
-  link.download = '';
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
+  window.open(downloadUrl, '_blank', 'noopener,noreferrer');
 };
 
-const pollPreparationJob = async (jobId, onUpdate) => {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    const response = await fetch(`${API_BASE_URL}/api/download/progress/${encodeURIComponent(jobId)}`, {
-      cache: 'no-store'
+const streamDownloadProgress = async (jobId, { signal }, onUpdate, onReady, onError) => {
+  return new Promise((resolve, reject) => {
+    const eventSource = new EventSource(`${API_BASE_URL}/api/download/progress/${encodeURIComponent(jobId)}/stream`);
+    let timeoutId = null;
+
+    const finish = (handler) => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      eventSource.close();
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      handler();
+    };
+
+    const onAbort = () => {
+      finish(() => reject(new Error('Download cancelled by user.')));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort);
+    }
+
+    eventSource.addEventListener('message', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if (data.status === 'ready') {
+          onReady?.(data);
+          finish(() => resolve(data));
+        } else if (data.status === 'failed') {
+          finish(() => reject(new Error(data.error || 'Download failed.')));
+        } else {
+          // Progress update
+          onUpdate?.(data);
+        }
+      } catch (error) {
+        console.error('Failed to parse progress event:', error);
+      }
     });
 
-    if (!response.ok) {
-      throw new Error(await parseJsonError(response));
-    }
+    eventSource.addEventListener('error', (error) => {
+      finish(() => reject(new Error('Connection lost. Please check your network.')));
+    });
 
-    const payload = await response.json();
-    const job = payload.job;
-    onUpdate(job);
-
-    if (job.status === 'ready') {
-      return job;
-    }
-
-    if (job.status === 'failed') {
-      throw new Error(job.error || 'Could not prepare the download.');
-    }
-
-    await sleep(900);
-  }
-
-  throw new Error('Download preparation timed out. Please try again.');
+    // Timeout after 30 minutes
+    timeoutId = setTimeout(() => {
+      finish(() => reject(new Error('Download preparation timed out. Please try again.')));
+    }, 30 * 60 * 1000);
+  });
 };
 
 const buildProgressMetaLabel = ({ progress, speedText, etaText }) => {
-  const safeProgress = `${Math.max(0, Math.min(100, Number(progress) || 0))}%`;
+  const safeProgress = `${Math.max(0, Math.min(100, Math.round(Number(progress) || 0)))}%`;
   const safeSpeed = speedText || '--';
   const safeEta = etaText || '--';
 
@@ -200,6 +225,8 @@ function App() {
   const [downloadState, setDownloadState] = useState(defaultDownloadState);
   const [toasts, setToasts] = useState([]);
   const downloadModalTimerRef = useRef(null);
+  const abortControllerRef = useRef(null);
+  const activeJobIdRef = useRef(null);
 
   const videoFormats = useMemo(
     () => video?.formats.filter((format) => format.type === 'video') ?? [],
@@ -231,6 +258,16 @@ function App() {
   );
 
   const resetDownloadState = () => {
+    if (activeJobIdRef.current) {
+      fetch(`${API_BASE_URL}/api/download/cancel/${activeJobIdRef.current}`, {
+        method: 'DELETE'
+      }).catch(console.error);
+      activeJobIdRef.current = null;
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
     window.clearTimeout(downloadModalTimerRef.current);
     downloadModalTimerRef.current = null;
     setDownloadState(defaultDownloadState);
@@ -277,7 +314,7 @@ function App() {
       status: 'preparing',
       formatId: format.id,
       label: `Preparing ${format.label}`,
-      progress: 1,
+      progress: 0,
       speedText: null,
       etaText: null
     });
@@ -296,40 +333,58 @@ function App() {
       }
 
       const startPayload = await startResponse.json();
-      const readyJob = await pollPreparationJob(startPayload.jobId, (job) => {
-        setDownloadState((current) => {
-          if (current.status === 'idle') {
-            return current;
-          }
+      activeJobIdRef.current = startPayload.jobId;
 
-          return {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
+      await streamDownloadProgress(
+        startPayload.jobId,
+        { signal: abortController.signal },
+        (progressData) => {
+          // Real-time progress update
+          setDownloadState((current) => {
+            if (current.status === 'idle' || current.status === 'transferring') {
+              return current;
+            }
+
+            return {
+              ...current,
+              status: 'preparing',
+              label: current.label,
+              progress: Math.max(0, Math.min(100, Number(progressData.progress) || 0)),
+              speedText: progressData.speedText || null,
+              etaText: progressData.etaText || null
+            };
+          });
+        },
+        (readyData) => {
+          // Download ready
+          const resolvedDownloadUrl = String(readyData.downloadUrl || '').startsWith('http')
+            ? readyData.downloadUrl
+            : `${API_BASE_URL}${readyData.downloadUrl}`;
+
+          setDownloadState((current) => ({
             ...current,
-            status: job.status,
-            label: job.label || `Preparing ${format.label}`,
-            progress: Math.max(1, Math.min(100, Number(job.progress) || 1)),
-            speedText: job.speedText || current.speedText,
-            etaText: job.etaText || current.etaText
-          };
-        });
-      });
+            status: 'transferring',
+            label: 'Sending to browser / IDM…',
+            progress: 100,
+            speedText: null,
+            etaText: null
+          }));
 
-      const resolvedDownloadUrl = String(readyJob.downloadUrl || '').startsWith('http')
-        ? readyJob.downloadUrl
-        : `${API_BASE_URL}${readyJob.downloadUrl}`;
-
-      setDownloadState((current) => ({
-        ...current,
-        status: 'ready',
-        label: 'Opening download…',
-        progress: 100,
-        etaText: '00:00'
-      }));
-
-      openExternalDownload(resolvedDownloadUrl);
-      pushToast('Download is ready. Opening in IDM or browser.', 'success');
-      window.clearTimeout(downloadModalTimerRef.current);
-      downloadModalTimerRef.current = window.setTimeout(resetDownloadState, 1500);
+          openExternalDownload(resolvedDownloadUrl);
+          pushToast('File is ready — your browser or IDM is now downloading it.', 'success');
+        }
+      );
     } catch (error) {
+      if (error.message === 'Download cancelled by user.') {
+        // Suppress toast for user cancellation
+        return;
+      }
       setDownloadState(defaultDownloadState);
       pushToast(error.message || 'Could not prepare the download.', 'error');
     }
@@ -499,32 +554,51 @@ function App() {
 
       {downloadState.status !== 'idle' && (
         <div className="download-modal-backdrop" role="dialog" aria-modal="true" aria-label="Download progress">
-          <div className="download-modal">
+          <div className={`download-modal ${downloadState.status === 'transferring' ? 'is-ready' : ''}`}>
+            
+            <div className="modal-glow-bg"></div>
+
             <div className="download-modal-header">
-              <div>
-                <span className="eyebrow">Download</span>
-                <h2>{downloadState.label}</h2>
+              <div className="header-info">
+                <span className="eyebrow glow-text">Active Task</span>
+                <h2 className="title-pulse">{downloadState.label}</h2>
               </div>
-              <span className="download-status-pill">{downloadState.status}</span>
+              <span className={`download-status-pill status-${downloadState.status}`}>
+                {downloadState.status === 'preparing' ? <span className="dot-pulse"></span> : null}
+                {downloadState.status}
+              </span>
             </div>
 
-            <div className="download-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={downloadState.progress}>
-              <div className="download-progress-bar" style={{ width: `${downloadState.progress}%` }} />
+            <div className="download-progress-container">
+              <div className="download-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={downloadState.progress}>
+                <div className="download-progress-bar" style={{ width: `${downloadState.progress}%` }}>
+                  <div className="progress-glow"></div>
+                </div>
+              </div>
+              <div className="progress-metrics">
+                <span className="metric-pct">{downloadState.progress}%</span>
+                {downloadState.status !== 'transferring' && (
+                  <span className="metric-details">
+                    <span className="speed">{downloadState.speedText || 'Calculating'}</span>
+                    <span className="separator">•</span>
+                    <span className="eta">{downloadState.etaText || '--:--'}</span>
+                  </span>
+                )}
+              </div>
             </div>
 
-            <p className="download-modal-copy">
-              {buildProgressMetaLabel(downloadState)}
-            </p>
-
-            <p className="download-modal-note">Browser/IDM opens automatically when ready.</p>
-
-            <div className="download-modal-actions">
+            <div className="download-modal-footer">
+              <div className="status-message">
+                {downloadState.status === 'transferring'
+                  ? 'Ready! Check your browser downloads.'
+                  : 'Your browser or IDM will capture this automatically.'}
+              </div>
               <button
                 type="button"
-                className="secondary-button"
+                className="cancel-btn"
                 onClick={resetDownloadState}
               >
-                Close
+                {downloadState.status === 'transferring' ? 'Dismiss' : 'Cancel Process'}
               </button>
             </div>
           </div>
