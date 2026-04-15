@@ -18,6 +18,7 @@ import { getVideoInfo } from './services/videoService.js';
 import { asyncHandler } from './utils/asyncHandler.js';
 import { createHttpError } from './utils/httpError.js';
 import { ensureValidYouTubeUrl } from './utils/validateYouTubeUrl.js';
+import { startPeriodicCleanup } from './utils/tempCleanup.js';
 
 const PREPARATION_JOB_TTL_MS = 15 * 60 * 1000;
 const PROGRESS_RATE_LIMIT_WINDOW_MS = 60 * 1000;
@@ -265,6 +266,13 @@ export const createApp = () => {
         } catch (error) {
           markPreparationFailed(jobId, error);
 
+          // Different log levels based on error type
+          if (error.message?.includes('cancelled') || error.name === 'AbortError') {
+            console.log(`[Download] Job ${jobId} was cancelled by user: ${error.message}`);
+          } else {
+            console.error(`[Download] Job ${jobId} failed:`, error.message);
+          }
+
           // Notify SSE clients of failure
           const failedJob = preparationJobs.get(jobId);
           if (failedJob) {
@@ -287,30 +295,67 @@ export const createApp = () => {
 
   app.delete(
     '/api/download/cancel/:jobId',
-    (req, res) => {
+    asyncHandler(async (req, res) => {
       const job = preparationJobs.get(req.params.jobId);
 
       if (!job) {
         return res.status(404).json({ error: 'Job not found' });
       }
 
+      console.log(`[Cancel] User requested cancellation for job ${req.params.jobId}`);
+
+      // Abort the download process
       if (job.abortController) {
+        console.log(`[Cancel] Triggering abort signal for job ${req.params.jobId}`);
         job.abortController.abort();
       }
 
+      // Mark job as cancelled
       job.status = 'failed';
       job.error = 'Cancelled by user';
       
+      // Notify SSE clients immediately
       const errorEvent = JSON.stringify({ status: 'failed', error: 'Cancelled by user' });
       job.sseClients.forEach((client) => {
-        client.write(`data: ${errorEvent}\n\n`);
-        client.end();
+        try {
+          client.write(`data: ${errorEvent}\n\n`);
+          client.end();
+        } catch (e) {
+          // Client may already be disconnected
+        }
       });
       job.sseClients.clear();
 
-      void removePreparationJob(job.id);
-      res.json({ success: true });
-    }
+      // Clean up the file immediately (with retries)
+      if (job.filePath) {
+        let fileDeleted = false;
+        for (let i = 0; i < 3; i++) {
+          try {
+            await fs.unlink(job.filePath);
+            fileDeleted = true;
+            console.log(`[Cancel] Deleted partial file: ${job.filePath}`);
+            break;
+          } catch (error) {
+            if (error.code === 'ENOENT') {
+              console.log(`[Cancel] File already deleted: ${job.filePath}`);
+              fileDeleted = true;
+              break;
+            }
+            if (i < 2) {
+              console.warn(`[Cancel] Retry ${i + 1}/3 - Failed to delete ${job.filePath}: ${error.message}`);
+              // Wait a bit before retrying
+              await new Promise(resolve => setTimeout(resolve, 100));
+            } else {
+              console.error(`[Cancel] Failed to delete ${job.filePath} after 3 attempts: ${error.message}`);
+            }
+          }
+        }
+      }
+
+      await removePreparationJob(job.id);
+      console.log(`[Cancel] Job ${req.params.jobId} cleanup complete`);
+      res.json({ success: true, message: 'Download cancelled' });
+    })
   );
 
   app.get(
@@ -509,6 +554,16 @@ export const createApp = () => {
 
   app.use(notFoundHandler);
   app.use(errorHandler);
+
+  // Start periodic cleanup of temp directory
+  const cleanupIntervalId = startPeriodicCleanup(
+    config.tempDir,
+    config.tempCleanupIntervalMs,
+    config.tempFileMaxAgeMs
+  );
+  
+  // Store cleanup interval on app for potential shutdown handling
+  app.cleanupIntervalId = cleanupIntervalId;
 
   return app;
 };

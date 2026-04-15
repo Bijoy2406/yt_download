@@ -12,6 +12,31 @@ try {
   console.error(error);
 }
 
-app.listen(config.port, '0.0.0.0', () => {
+const server = app.listen(config.port, '0.0.0.0', () => {
   console.log(`TubeVault API listening on port ${config.port}`);
 });
+
+// Graceful shutdown handling
+const gracefulShutdown = () => {
+  console.log('[Server] Shutting down gracefully...');
+  
+  // Clear cleanup interval
+  if (app.cleanupIntervalId) {
+    clearInterval(app.cleanupIntervalId);
+    console.log('[Server] Cleanup interval cleared');
+  }
+  
+  server.close(() => {
+    console.log('[Server] Server closed');
+    process.exit(0);
+  });
+  
+  // Force shutdown after 30 seconds
+  setTimeout(() => {
+    console.error('[Server] Forced shutdown after timeout');
+    process.exit(1);
+  }, 30000);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);

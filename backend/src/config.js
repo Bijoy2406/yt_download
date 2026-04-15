@@ -34,5 +34,8 @@ export const config = {
   binaryDir: path.join(backendRoot, 'bin'),
   ytDlpPath: process.env.YT_DLP_PATH?.trim() || null,
   ytDlpCookiesFile: process.env.YT_DLP_COOKIES_FILE?.trim() || null,
-  ytDlpCookiesFromBrowser: process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim() || null
+  ytDlpCookiesFromBrowser: process.env.YT_DLP_COOKIES_FROM_BROWSER?.trim() || null,
+  // Temp folder cleanup settings (all in milliseconds)
+  tempCleanupIntervalMs: Number(process.env.TEMP_CLEANUP_INTERVAL_MS || 60 * 60 * 1000), // Default: 1 hour
+  tempFileMaxAgeMs: Number(process.env.TEMP_FILE_MAX_AGE_MS || 24 * 60 * 60 * 1000) // Default: 24 hours
 };

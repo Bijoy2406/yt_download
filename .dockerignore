@@ -1,0 +1,9 @@
+.git
+.gitignore
+frontend/
+backend/node_modules/
+backend/bin/
+backend/tmp/
+backend/.env
+.env
+*.md

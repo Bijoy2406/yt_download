@@ -1,3 +1,13 @@
+---
+title: YouTube Downloader Backend
+emoji: 🚀
+colorFrom: blue
+colorTo: red
+sdk: docker
+app_port: 7860
+---
+
+
 # TubeVault
 
 TubeVault is a production-ready YouTube video and audio downloader with a Vercel-friendly frontend and a Render-friendly backend. The frontend is built with React + Vite, and the API uses Express, `yt-dlp`, and `ffmpeg` to fetch metadata and generate MP4 or MP3 downloads without storing user data.

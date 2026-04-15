@@ -340,7 +340,8 @@ export const createDownloadJob = async (youtubeUrl, formatId, preparedDownload, 
       lastError = error;
       console.error(`Download attempt ${index + 1} failed:`, error.message);
 
-      if (error.name === 'AbortError') {
+      if (error.name === 'AbortError' || error.message?.includes('cancelled')) {
+        console.log(`[Download] Abort signal detected, stopping retries`);
         throw error;
       }
 
